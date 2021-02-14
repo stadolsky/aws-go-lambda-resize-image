@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/ioutil"
 
@@ -19,8 +20,8 @@ type Event struct {
 	InImageKey  string      `json:"in_image_key"`
 	OutBucket   string      `json:"out_bucket"`
 	OutImageKey string      `json:"out_image_key"`
-	Resolution  string      `json:"resolution"`
-	OutFormat   imageFormat `json:"out_format"`
+	Resolution  uint        `json:"resolution"` // px
+	OutFormat   imageFormat `json:"out_format"` // jpg, png
 }
 
 type imageFormat string
@@ -56,7 +57,7 @@ func HandleLambdaEvent(event Event) error {
 
 	// Read the chunk
 	originalImageData, err := ioutil.ReadAll(objectOutput.Body)
-	newImageData, err := resize(originalImageData, event.OutFormat)
+	newImageData, err := resize(originalImageData, event.Resolution, event.OutFormat)
 	if err != nil {
 		return fmt.Errorf("fialde to create new resided image: %w", err)
 	}
@@ -67,8 +68,6 @@ func HandleLambdaEvent(event Event) error {
 		Key:    aws.String(event.OutImageKey),
 	})
 
-	fmt.Println(fmt.Sprint("New file size: %d", len(newImageData)))
-
 	if err != nil {
 		return fmt.Errorf("failed to save image with keyobject `%s` in bucket `%s`: %w", event.OutImageKey, event.OutBucket, err)
 	}
@@ -76,10 +75,60 @@ func HandleLambdaEvent(event Event) error {
 	return nil
 }
 
-func resize(data []byte, format imageFormat) ([]byte, error) {
+func (f imageFormat) isValid() bool {
+	switch f {
+	case imageFormatJPG:
+		return true
+	case imageFormatPNG:
+		return true
+	}
+
+	return false
+}
+
+func validateEvent(event Event) error {
+	if event.Region == "" {
+		return errors.New("event param `Region` is required")
+	}
+
+	if event.InBucket == "" {
+		return errors.New("event param `InBucket` is required")
+	}
+
+	if event.InImageKey == "" {
+		return errors.New("event param `InImageKey` is required")
+	}
+
+	if event.OutBucket == "" {
+		return errors.New("event param `OutBucket` is required")
+	}
+
+	if event.OutImageKey == "" {
+		return errors.New("event param `OutImageKey` is required")
+	}
+
+	if event.OutFormat == "" {
+		return errors.New("event param `OutFormat` is required")
+	}
+
+	if !event.OutFormat.isValid() {
+		return errors.New(fmt.Sprintf("event param `OutFormat` value `%s` is invalid. allowed values are `%s`, `%s`",
+			event.OutFormat, imageFormatPNG, imageFormatJPG,
+		))
+	}
+
+	if event.Resolution == 0 {
+		return errors.New("event param `Resolution` must not be zero")
+	}
+
+	return nil
+}
+
+func resize(data []byte, resolution uint, format imageFormat) ([]byte, error) {
 	imagick.Initialize()
 	// Schedule cleanup
 	defer imagick.Terminate()
+
 	var err error
 
 	mw := imagick.NewMagickWand()
@@ -89,17 +138,23 @@ func resize(data []byte, format imageFormat) ([]byte, error) {
 		return nil, err
 	}
 
-	// Get original logo size
+	// Get original image size
 	width := mw.GetImageWidth()
 	height := mw.GetImageHeight()
 
-	// Calculate half the size
-	hWidth := uint(width / 2)
-	hHeight := uint(height / 2)
+	// Calculate New Image Size
+	var newWidth, newHeight uint
+	if width > height {
+		newHeight = resolution
+		newWidth = newHeight * width / height
+	} else {
+		newWidth = resolution
+		newHeight = newWidth * height / width
+	}
 
 	// Resize the image using the Lanczos filter
 	// The blur factor is a float, where > 1 is blurry, < 1 is sharp
-	err = mw.ResizeImage(hWidth, hHeight, imagick.FILTER_LANCZOS, 1)
+	err = mw.ResizeImage(newWidth, newHeight, imagick.FILTER_LANCZOS, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +165,7 @@ func resize(data []byte, format imageFormat) ([]byte, error) {
 		return nil, err
 	}
 
-	// Convert into JPG
+	// Convert into pointed format
 	if err := mw.SetFormat(string(format)); err != nil {
 		return nil, err
 	}
