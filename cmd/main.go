@@ -14,8 +14,7 @@ import (
 	"gopkg.in/gographics/imagick.v2/imagick"
 )
 
-type Event struct {
-	Region      string      `json:"region"`
+type Request struct {
 	InBucket    string      `json:"in_bucket"`
 	InImageKey  string      `json:"in_image_key"`
 	OutBucket   string      `json:"out_bucket"`
@@ -32,11 +31,15 @@ const (
 )
 
 func main() {
-	lambda.Start(HandleLambdaEvent)
+	lambda.Start(HandleResizeS3Image)
 }
 
-func HandleLambdaEvent(event Event) error {
-	sess, err := session.NewSession(&aws.Config{Region: aws.String(event.Region)})
+func HandleResizeS3Image(r Request) error {
+	if err := validateRequest(r); err != nil {
+		return fmt.Errorf("invalid Request: %w", err)
+	}
+
+	sess, err := session.NewSession(&aws.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to create NewSession for SDK: %w", err)
 	}
@@ -44,32 +47,33 @@ func HandleLambdaEvent(event Event) error {
 	svc := s3.New(sess)
 
 	input := s3.GetObjectInput{
-		Bucket: aws.String(event.InBucket),
-		Key:    aws.String(event.InImageKey),
+		Bucket: aws.String(r.InBucket),
+		Key:    aws.String(r.InImageKey),
 	}
 
 	objectOutput, err := svc.GetObject(&input)
 	if err != nil {
-		return fmt.Errorf("failed to get object `%s` in bucket `%s`: %w", event.InImageKey, event.InBucket, err)
+		return fmt.Errorf("failed to get object `%s` in bucket `%s`: %w", r.InImageKey, r.InBucket, err)
 	}
 
 	defer objectOutput.Body.Close()
 
 	// Read the chunk
 	originalImageData, err := ioutil.ReadAll(objectOutput.Body)
-	newImageData, err := resize(originalImageData, event.Resolution, event.OutFormat)
+
+	newImageData, err := resize(originalImageData, r.Resolution, r.OutFormat)
 	if err != nil {
 		return fmt.Errorf("fialde to create new resided image: %w", err)
 	}
 
 	_, err = svc.PutObject(&s3.PutObjectInput{
 		Body:   bytes.NewReader(newImageData),
-		Bucket: aws.String(event.OutBucket),
-		Key:    aws.String(event.OutImageKey),
+		Bucket: aws.String(r.OutBucket),
+		Key:    aws.String(r.OutImageKey),
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to save image with keyobject `%s` in bucket `%s`: %w", event.OutImageKey, event.OutBucket, err)
+		return fmt.Errorf("failed to save image with keyobject `%s` in bucket `%s`: %w", r.OutImageKey, r.OutBucket, err)
 	}
 
 	return nil
@@ -86,39 +90,35 @@ func (f imageFormat) isValid() bool {
 	return false
 }
 
-func validateEvent(event Event) error {
-	if event.Region == "" {
-		return errors.New("event param `Region` is required")
+func validateRequest(request Request) error {
+	if request.InBucket == "" {
+		return errors.New("request param `InBucket` is required")
 	}
 
-	if event.InBucket == "" {
-		return errors.New("event param `InBucket` is required")
+	if request.InImageKey == "" {
+		return errors.New("request param `InImageKey` is required")
 	}
 
-	if event.InImageKey == "" {
-		return errors.New("event param `InImageKey` is required")
+	if request.OutBucket == "" {
+		return errors.New("request param `OutBucket` is required")
 	}
 
-	if event.OutBucket == "" {
-		return errors.New("event param `OutBucket` is required")
+	if request.OutImageKey == "" {
+		return errors.New("request param `OutImageKey` is required")
 	}
 
-	if event.OutImageKey == "" {
-		return errors.New("event param `OutImageKey` is required")
+	if request.OutFormat == "" {
+		return errors.New("request param `OutFormat` is required")
 	}
 
-	if event.OutFormat == "" {
-		return errors.New("event param `OutFormat` is required")
-	}
-
-	if !event.OutFormat.isValid() {
-		return errors.New(fmt.Sprintf("event param `OutFormat` value `%s` is invalid. allowed values are `%s`, `%s`",
-			event.OutFormat, imageFormatPNG, imageFormatJPG,
+	if !request.OutFormat.isValid() {
+		return errors.New(fmt.Sprintf("request param `OutFormat` value `%s` is invalid. allowed values are `%s`, `%s`",
+			request.OutFormat, imageFormatPNG, imageFormatJPG,
 		))
 	}
 
-	if event.Resolution == 0 {
-		return errors.New("event param `Resolution` must not be zero")
+	if request.Resolution == 0 {
+		return errors.New("request param `Resolution` must not be zero")
 	}
 
 	return nil
@@ -144,6 +144,7 @@ func resize(data []byte, resolution uint, format imageFormat) ([]byte, error) {
 
 	// Calculate New Image Size
 	var newWidth, newHeight uint
+
 	if width > height {
 		newHeight = resolution
 		newWidth = newHeight * width / height
